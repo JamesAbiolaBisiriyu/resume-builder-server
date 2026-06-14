@@ -190,7 +190,7 @@ export const registerUser = async (req, res) => {
     } catch (mailError) {
       // If email fails, delete the user and return error
       await User.findByIdAndDelete(newUser._id);
-      console.error("Mail error:", mailError.message);
+      console.error("❌ Mail error details:", mailError); // change this line
       return res.status(500).json({
         message: "Failed to send verification email. Please try again.",
       });

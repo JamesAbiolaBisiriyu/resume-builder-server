@@ -81,20 +81,55 @@ export const normalizeDateToYYYYMM = (val) => {
 };
 
 // ─── Resume Input Normalization ───────────────────────────────────────────────
+//
+// FIX (critical data-loss bug):
+// The previous version of this function ALWAYS returned a full object with
+// every resume field (personal_info, experience, education, projects, skills,
+// professional_summary) — even when `data` only contained `{ public: true }`
+// or `{ template: "modern" }` for a partial update (visibility toggle, template
+// switch, colour change).
+//
+// Because every field defaulted to "" / [] when absent from `data`, the
+// resulting object was then passed to `$set: normalized` in Mongoose,
+// which OVERWROTE the entire personal_info / experience / education / skills /
+// projects fields with blanks — silently wiping out the user's real resume
+// content on every partial update (e.g. toggling Public/Private).
+//
+// FIX: Only include a key in the returned object if the corresponding key was
+// actually present in the incoming `data`. This makes `$set` a true partial
+// update — untouched fields are left alone in the database.
+//
+// FIX (field name mismatch):
+// The frontend (AppContext / ResumeBuilder / all templates) uses `projects`
+// (plural) everywhere — it is also the correct field name in Resume.js schema.
+// This function previously wrote to `project` (singular), a stray legacy
+// field that the frontend never reads. That meant projects added in the UI
+// were saved to a field (`project`) that prepareResumeResponse also never
+// returned — so projects always appeared empty after reload.
+// FIX: normalize to `projects` (plural) — matches schema + frontend + API
+// response. The legacy `project` (singular) field is left alone (untouched,
+// not written to) and prepareResumeResponse no longer reads from it.
 
 export const normalizeResumeInput = (data = {}) => {
   const s = (val) => (typeof val === "string" ? val.trim() : "");
   const a = (val) => (Array.isArray(val) ? val : []);
-  const pi = data.personal_info || {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(data, key);
 
-  return {
-    professional_summary: s(data.professional_summary),
+  const result = {};
 
-    skills: a(data.skills)
+  if (has("professional_summary")) {
+    result.professional_summary = s(data.professional_summary);
+  }
+
+  if (has("skills")) {
+    result.skills = a(data.skills)
       .map((x) => (typeof x === "string" ? x.trim() : ""))
-      .filter(Boolean),
+      .filter(Boolean);
+  }
 
-    personal_info: {
+  if (has("personal_info")) {
+    const pi = data.personal_info || {};
+    result.personal_info = {
       image: s(pi.image),
       full_name: s(pi.full_name),
       profession: s(pi.profession),
@@ -103,31 +138,42 @@ export const normalizeResumeInput = (data = {}) => {
       location: s(pi.location),
       linkedin: s(pi.linkedin),
       website: s(pi.website),
-    },
+    };
+  }
 
-    experience: a(data.experience).map((e) => ({
+  if (has("experience")) {
+    result.experience = a(data.experience).map((e) => ({
       company: s(e.company),
       position: s(e.position),
       start_date: normalizeDateToYYYYMM(e.start_date),
       end_date: normalizeDateToYYYYMM(e.end_date),
       description: s(e.description),
       is_current: typeof e.is_current === "boolean" ? e.is_current : false,
-    })),
+    }));
+  }
 
-    project: a(data.project || data.projects).map((p) => ({
+  // Accept either `projects` (current/correct) or legacy `project` as input,
+  // but always write out to `projects` — the field the schema, frontend,
+  // and API response all agree on.
+  if (has("projects") || has("project")) {
+    result.projects = a(data.projects || data.project).map((p) => ({
       name: s(p.name),
       type: s(p.type),
       description: s(p.description),
-    })),
+    }));
+  }
 
-    education: a(data.education).map((e) => ({
+  if (has("education")) {
+    result.education = a(data.education).map((e) => ({
       institution: s(e.institution),
       degree: s(e.degree),
       field: s(e.field),
       graduation_date: normalizeDateToYYYYMM(e.graduation_date),
       gpa: s(e.gpa),
-    })),
-  };
+    }));
+  }
+
+  return result;
 };
 
 // ─── Resume Payload Validation ────────────────────────────────────────────────
@@ -136,13 +182,23 @@ export const validateResumePayload = (body = {}, options = {}) => {
   const { requireTitle = false } = options;
   const errors = [];
 
-  const title = sanitizeText(body.title, { maxLength: 120 });
-  if (requireTitle && !title) errors.push("Title is required");
+  const normalized = { ...normalizeResumeInput(body) };
 
-  const normalized = {
-    ...(title ? { title } : {}),
-    ...normalizeResumeInput(body),
-  };
+  if (typeof body.title !== "undefined") {
+    const title = sanitizeText(body.title, { maxLength: 120 });
+    if (requireTitle && !title) errors.push("Title is required");
+    if (title) normalized.title = title;
+  } else if (requireTitle) {
+    errors.push("Title is required");
+  }
+
+  if (typeof body.template !== "undefined") {
+    normalized.template = sanitizeText(body.template, { maxLength: 32 });
+  }
+
+  if (typeof body.accent_color !== "undefined") {
+    normalized.accent_color = sanitizeText(body.accent_color, { maxLength: 16 });
+  }
 
   if (typeof body.isPublic !== "undefined") normalized.isPublic = sanitizeBoolean(body.isPublic);
   if (typeof body.public !== "undefined") normalized.public = sanitizeBoolean(body.public);
@@ -177,6 +233,13 @@ export const validateAuthPayload = (body = {}, mode = "login") => {
 };
 
 // ─── Resume Response Formatter ────────────────────────────────────────────────
+//
+// FIX: now returns `projects` (plural) — matches frontend/schema — instead of
+// the legacy `project` (singular) field that the frontend never read.
+// Also added: title, template, accent_color, public — these were missing from
+// the response entirely, even though the frontend's normalizeResume() expects
+// them (it falls back to defaults, masking the bug, but the saved values were
+// never round-tripped back to the UI after a reload).
 
 export const prepareResumeResponse = (resumeDoc) => {
   if (!resumeDoc) return null;
@@ -199,9 +262,14 @@ export const prepareResumeResponse = (resumeDoc) => {
       website: resume.personal_info?.website || "",
     },
     experience: Array.isArray(resume.experience) ? resume.experience : [],
-    project: Array.isArray(resume.project) ? resume.project : [],
+    projects: Array.isArray(resume.projects)
+      ? resume.projects
+      : Array.isArray(resume.project)
+        ? resume.project
+        : [],
     education: Array.isArray(resume.education) ? resume.education : [],
-    isPublic: resume.isPublic || resume.public || false,
+    public: resume.public ?? resume.isPublic ?? false,
+    isPublic: resume.isPublic ?? resume.public ?? false,
     template: resume.template || "classic",
     accent_color: resume.accent_color || "#3B82F6",
     createdAt: resume.createdAt,

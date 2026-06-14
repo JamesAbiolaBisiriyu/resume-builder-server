@@ -74,6 +74,12 @@ const ResumeSchema = new mongoose.Schema(
         is_current: { type: Boolean },
       },
     ],
+
+    // FIX: removed the legacy duplicate `project` (singular) array field.
+    // The frontend, ResumePreview, and all four templates only ever read
+    // `projects` (plural) — the singular field was dead weight that the
+    // old normalizeResumeInput() wrote to by mistake, while this `projects`
+    // field was left empty and never returned to the client.
     projects: [
       {
         name: { type: String, trim: true, maxlength: 160 },
@@ -81,13 +87,7 @@ const ResumeSchema = new mongoose.Schema(
         description: { type: String, trim: true, maxlength: 5000 },
       },
     ],
-    project: [
-      {
-        name: { type: String, trim: true, maxlength: 160 },
-        type: { type: String, trim: true, maxlength: 120 },
-        description: { type: String, trim: true, maxlength: 5000 },
-      },
-    ],
+
     education: [
       {
         institution: { type: String, trim: true, maxlength: 160 },

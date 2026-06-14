@@ -59,9 +59,6 @@ export const getPublicResumeById = async (req, res) => {
 };
 
 export const updateResume = async (req, res) => {
-   console.log("=== updateResume hit ===");
-  // console.log("body keys:", Object.keys(req.body));
-  // console.log("file:", req.file);
   try {
     const userId = req.userId;
     const { resumeId: bodyResumeId, resumeData, removeBackground } = req.body;
@@ -76,10 +73,10 @@ export const updateResume = async (req, res) => {
         ? JSON.parse(resumeData)
         : { ...(resumeData || {}) };
 
-    if (typeof removeBackground !== "undefined") {
-      resumeDataCopy.personal_info = { ...(resumeDataCopy.personal_info || {}) };
-    }
-
+    // If an image file was uploaded, upload to ImageKit and merge the URL into
+    // personal_info — but only touch personal_info if it (or the image) is
+    // actually part of this request, so normalizeResumeInput still treats
+    // personal_info as "present" and includes it in the $set.
     if (image) {
       const uploadResponse = await imagekit.files.upload({
         file: fs.createReadStream(image.path),
@@ -89,7 +86,10 @@ export const updateResume = async (req, res) => {
           pre: "w-300,h-300,fo-face,z-0.75" + (removeBackground ? ",e-bgremove" : ""),
         },
       });
-      resumeDataCopy.personal_info.image = uploadResponse.url;
+      resumeDataCopy.personal_info = {
+        ...(resumeDataCopy.personal_info || {}),
+        image: uploadResponse.url,
+      };
       fs.unlink(image.path, () => {});
     }
 
@@ -97,22 +97,28 @@ export const updateResume = async (req, res) => {
       resumeDataCopy.removeBackground = sanitizeBoolean(removeBackground);
     }
 
+    // NOTE: validateResumePayload / normalizeResumeInput now only include keys
+    // that were actually present in resumeDataCopy, so $set never wipes out
+    // fields the client didn't send (e.g. toggling `public` no longer blanks
+    // out personal_info, experience, education, etc).
     const isPartialUpdate = Object.keys(resumeDataCopy).every((k) =>
       ["public", "isPublic", "template", "accent_color", "removeBackground"].includes(k)
     );
 
-    // console.log("resumeDataCopy:", JSON.stringify(resumeDataCopy, null, 2));
-
     const { errors, normalized } = validateResumePayload(resumeDataCopy, {
-      requireTitle: !isPartialUpdate,
+      requireTitle: false,
     });
 
     if (errors.length > 0) return res.status(400).json({ message: errors[0], errors });
 
+    if (Object.keys(normalized).length === 0) {
+      return res.status(400).json({ message: "No valid fields to update" });
+    }
+
     const resume = await Resume.findOneAndUpdate(
       { userId, _id: resumeId },
       { $set: normalized },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
 
     if (!resume) return res.status(404).json({ message: "Resume not found" });
@@ -123,4 +129,3 @@ export const updateResume = async (req, res) => {
     return res.status(400).json({ message: error.message });
   }
 };
-
